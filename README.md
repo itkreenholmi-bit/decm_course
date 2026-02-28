@@ -127,6 +127,9 @@ make etl-backfill-2020-today
 Detailed ETL notes and precipitation-source investigation:
 - `docs/etl-airviro.md`
 
+Superset snippet examples (calculated columns and metrics):
+- `superset/snippets.md`
+
 ## Environment File
 
 - `.env` is local-only and ignored by git.
