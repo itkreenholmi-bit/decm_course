@@ -117,6 +117,7 @@ Then run ETL from the devcontainer:
 make etl-bootstrap
 make etl-dry-run
 make etl-backfill-2020-2025
+make warehouse-status
 ```
 
 For detailed progress logs (source/window/retry/split + cumulative counters):
@@ -124,6 +125,20 @@ For detailed progress logs (source/window/retry/split + cumulative counters):
 ```bash
 make etl-backfill-2020-2025 VERBOSE=1
 ```
+
+Warehouse monitoring report (for quick health checks in class):
+
+```bash
+make warehouse-status
+make warehouse-status-json
+```
+
+This report includes:
+- warehouse/table connectivity status;
+- total rows + date coverage (earliest/latest);
+- coverage by source/station;
+- indicator-level missing-hour and null-value counts;
+- current watermarks and most recent ingestion audit rows.
 
 Backfill to current date (useful later with Airflow orchestration):
 

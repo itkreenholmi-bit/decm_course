@@ -31,6 +31,7 @@ Run from repo root:
 .venv/bin/python -m etl.airviro.cli bootstrap-db
 .venv/bin/python -m etl.airviro.cli run --from 2020-01-01 --to 2025-12-31
 .venv/bin/python -m etl.airviro.cli backfill --from 2020-01-01
+.venv/bin/python -m etl.airviro.cli warehouse-status
 ```
 
 Run only selected sources (useful for onboarding a new station without replaying existing sources):
@@ -46,6 +47,12 @@ Verbose progress (recommended while teaching/debugging):
 ```
 
 `--verbose` prints source/window progress, retries, split events, and cumulative counts to stderr while keeping the final JSON summary on stdout.
+
+Warehouse status can also be exported as JSON for automation:
+
+```bash
+.venv/bin/python -m etl.airviro.cli warehouse-status --json
+```
 
 Dry-run validation without DB writes:
 

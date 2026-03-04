@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 try:
     import psycopg2
@@ -54,6 +54,189 @@ def apply_schema(connection: PgConnection, sql_path: Path) -> None:
     with connection.cursor() as cursor:
         cursor.execute(sql_text)
     connection.commit()
+
+
+def collect_warehouse_status(
+    connection: PgConnection,
+    *,
+    indicator_limit: int = 500,
+    audit_limit: int = 10,
+) -> dict[str, Any]:
+    """Collect warehouse-health and data-completeness metrics.
+
+    Args:
+      connection: Open warehouse connection.
+      indicator_limit: Maximum number of indicator-level rows to return.
+      audit_limit: Maximum number of most-recent audit rows to return.
+    """
+
+    if indicator_limit < 1:
+        raise ValueError("indicator_limit must be >= 1")
+    if audit_limit < 1:
+        raise ValueError("audit_limit must be >= 1")
+
+    status: dict[str, Any] = {}
+    with connection.cursor(cursor_factory=extras.RealDictCursor) as cursor:
+        cursor.execute(
+            """
+            SELECT
+              current_database() AS database_name,
+              current_user AS database_user,
+              now() AT TIME ZONE 'UTC' AS collected_at_utc
+            """
+        )
+        status["database"] = dict(cursor.fetchone())
+
+        cursor.execute(
+            """
+            SELECT
+              to_regclass('raw.airviro_measurement') IS NOT NULL AS has_measurement_table,
+              to_regclass('raw.airviro_ingestion_audit') IS NOT NULL AS has_ingestion_audit_table,
+              to_regclass('raw.pipeline_watermark') IS NOT NULL AS has_pipeline_watermark_table
+            """
+        )
+        table_status = dict(cursor.fetchone())
+        status["table_status"] = table_status
+
+        if not table_status["has_measurement_table"]:
+            status["warning"] = (
+                "raw.airviro_measurement does not exist yet. "
+                "Run bootstrap first: make etl-bootstrap"
+            )
+            return status
+
+        cursor.execute(
+            """
+            SELECT
+              COUNT(*)::bigint AS measurement_rows,
+              COUNT(DISTINCT source_type)::int AS source_type_count,
+              COUNT(DISTINCT station_id)::int AS station_count,
+              COUNT(DISTINCT indicator_code)::int AS indicator_count,
+              MIN(observed_at) AS first_observed_at,
+              MAX(observed_at) AS last_observed_at,
+              COUNT(*) FILTER (WHERE value_numeric IS NULL)::bigint AS null_value_rows
+            FROM raw.airviro_measurement
+            """
+        )
+        status["measurement_totals"] = dict(cursor.fetchone())
+
+        cursor.execute(
+            """
+            SELECT
+              source_type,
+              station_id,
+              COUNT(*)::bigint AS row_count,
+              COUNT(DISTINCT indicator_code)::int AS indicator_count,
+              COUNT(*) FILTER (WHERE value_numeric IS NULL)::bigint AS null_value_rows,
+              MIN(observed_at) AS first_observed_at,
+              MAX(observed_at) AS last_observed_at
+            FROM raw.airviro_measurement
+            GROUP BY source_type, station_id
+            ORDER BY source_type, station_id
+            """
+        )
+        status["coverage_by_source"] = [dict(row) for row in cursor.fetchall()]
+
+        cursor.execute(
+            """
+            WITH indicator_span AS (
+              SELECT
+                source_type,
+                station_id,
+                indicator_code,
+                MIN(observed_at) AS first_observed_at,
+                MAX(observed_at) AS last_observed_at,
+                COUNT(*)::bigint AS row_count,
+                COUNT(*) FILTER (WHERE value_numeric IS NULL)::bigint AS null_value_rows
+              FROM raw.airviro_measurement
+              GROUP BY source_type, station_id, indicator_code
+            ),
+            indicator_completeness AS (
+              SELECT
+                source_type,
+                station_id,
+                indicator_code,
+                row_count,
+                null_value_rows,
+                first_observed_at,
+                last_observed_at,
+                CASE
+                  WHEN source_type = 'pollen' THEN 'daily'
+                  ELSE 'hourly'
+                END AS expected_grain,
+                CASE
+                  WHEN first_observed_at IS NULL OR last_observed_at IS NULL THEN 0::bigint
+                  WHEN source_type = 'pollen' THEN ((EXTRACT(EPOCH FROM (last_observed_at - first_observed_at)) / 86400)::bigint + 1)
+                  ELSE ((EXTRACT(EPOCH FROM (last_observed_at - first_observed_at)) / 3600)::bigint + 1)
+                END AS expected_rows
+              FROM indicator_span
+            )
+            SELECT
+              source_type,
+              station_id,
+              indicator_code,
+              row_count,
+              expected_grain,
+              expected_rows,
+              GREATEST(expected_rows - row_count, 0)::bigint AS missing_rows,
+              ROUND(
+                (GREATEST(expected_rows - row_count, 0)::numeric / NULLIF(expected_rows, 0)::numeric) * 100,
+                2
+              ) AS missing_pct,
+              null_value_rows,
+              ROUND((null_value_rows::numeric / NULLIF(row_count, 0)::numeric) * 100, 2) AS null_value_pct,
+              first_observed_at,
+              last_observed_at
+            FROM indicator_completeness
+            ORDER BY source_type, station_id, indicator_code
+            LIMIT %s
+            """,
+            (indicator_limit,),
+        )
+        status["indicator_completeness"] = [dict(row) for row in cursor.fetchall()]
+
+        if table_status["has_pipeline_watermark_table"]:
+            cursor.execute(
+                """
+                SELECT
+                  pipeline_name,
+                  watermark_date,
+                  updated_at
+                FROM raw.pipeline_watermark
+                ORDER BY pipeline_name
+                """
+            )
+            status["watermarks"] = [dict(row) for row in cursor.fetchall()]
+        else:
+            status["watermarks"] = []
+
+        if table_status["has_ingestion_audit_table"]:
+            cursor.execute(
+                """
+                SELECT
+                  created_at,
+                  batch_id,
+                  source_key,
+                  source_type,
+                  station_id,
+                  window_start,
+                  window_end,
+                  rows_read,
+                  records_upserted,
+                  duplicate_records,
+                  split_events,
+                  status
+                FROM raw.airviro_ingestion_audit
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (audit_limit,),
+            )
+            status["recent_ingestion_runs"] = [dict(row) for row in cursor.fetchall()]
+        else:
+            status["recent_ingestion_runs"] = []
+
+    return status
 
 
 def upsert_measurements(connection: PgConnection, rows: Iterable[MeasurementRow]) -> int:

@@ -122,6 +122,8 @@ WITH air_quality AS (
     MAX(value_numeric) FILTER (WHERE indicator_code = 'temp') AS temp,
     MAX(value_numeric) FILTER (WHERE indicator_code = 'hum') AS hum,
     MAX(value_numeric) FILTER (WHERE indicator_code = 'rain') AS rain,
+    MAX(value_numeric) FILTER (WHERE indicator_code = 'press') AS press,
+    MAX(value_numeric) FILTER (WHERE indicator_code = 'rad') AS rad,
     MAX(value_numeric) FILTER (WHERE indicator_code = 'wd10') AS wd10,
     MAX(value_numeric) FILTER (WHERE indicator_code = 'ws10') AS ws10
   FROM raw.airviro_measurement
@@ -151,7 +153,9 @@ SELECT
   wd.sector_code AS wind_sector,
   wd.sector_name AS wind_sector_name,
   aq.hum,
-  aq.rain
+  aq.rain,
+  aq.press,
+  aq.rad
 FROM air_quality AS aq
 LEFT JOIN mart.dim_datetime_hour AS dt
   ON dt.observed_at = aq.observed_at

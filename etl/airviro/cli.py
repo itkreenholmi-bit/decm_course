@@ -13,6 +13,7 @@ import uuid
 from .config import Settings, load_env_file
 from .db import (
     apply_schema,
+    collect_warehouse_status,
     connect_warehouse,
     log_ingestion_audit,
     refresh_dimensions,
@@ -163,6 +164,223 @@ def build_progress_logger(verbose: bool) -> ProgressCallback | None:
     return _log
 
 
+def format_scalar(value: object) -> str:
+    """Render scalar values for tabular CLI output."""
+
+    if value is None:
+        return "-"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, int):
+        return f"{value:,}"
+    if isinstance(value, float):
+        return f"{value:.2f}"
+    if hasattr(value, "isoformat"):
+        try:
+            # Keep timestamps readable and stable in CLI output.
+            return str(value.isoformat(sep=" ", timespec="seconds"))
+        except TypeError:
+            return str(value.isoformat())
+    return str(value)
+
+
+def render_table(headers: list[str], rows: list[list[object]]) -> str:
+    """Render a simple ASCII table."""
+
+    text_rows = [[format_scalar(cell) for cell in row] for row in rows]
+    widths = [len(header) for header in headers]
+    for row in text_rows:
+        for index, cell in enumerate(row):
+            widths[index] = max(widths[index], len(cell))
+
+    header_row = " | ".join(
+        header.ljust(widths[index]) for index, header in enumerate(headers)
+    )
+    separator = "-+-".join("-" * width for width in widths)
+    body_rows = [
+        " | ".join(cell.ljust(widths[index]) for index, cell in enumerate(row))
+        for row in text_rows
+    ]
+    return "\n".join([header_row, separator, *body_rows])
+
+
+def render_warehouse_status(
+    status: dict[str, object],
+    *,
+    indicator_limit: int,
+    audit_limit: int,
+) -> str:
+    """Render warehouse status payload in a beginner-friendly text report."""
+
+    lines: list[str] = []
+    database = status.get("database", {})
+    table_status = status.get("table_status", {})
+
+    lines.append("Warehouse Status")
+    lines.append(f"host: {format_scalar(status.get('database_host'))}")
+    lines.append(f"database: {format_scalar(database.get('database_name'))}")
+    lines.append(f"user: {format_scalar(database.get('database_user'))}")
+    lines.append(f"collected_at_utc: {format_scalar(database.get('collected_at_utc'))}")
+    lines.append(
+        "tables: "
+        f"raw.airviro_measurement={format_scalar(table_status.get('has_measurement_table'))}, "
+        f"raw.airviro_ingestion_audit={format_scalar(table_status.get('has_ingestion_audit_table'))}, "
+        f"raw.pipeline_watermark={format_scalar(table_status.get('has_pipeline_watermark_table'))}"
+    )
+
+    warning = status.get("warning")
+    if warning:
+        lines.append(f"warning: {format_scalar(warning)}")
+        return "\n".join(lines)
+
+    totals = status.get("measurement_totals", {})
+    lines.append("")
+    lines.append("Measurement Totals")
+    lines.append(f"rows: {format_scalar(totals.get('measurement_rows'))}")
+    lines.append(f"source_types: {format_scalar(totals.get('source_type_count'))}")
+    lines.append(f"stations: {format_scalar(totals.get('station_count'))}")
+    lines.append(f"indicators: {format_scalar(totals.get('indicator_count'))}")
+    lines.append(f"first_observed_at: {format_scalar(totals.get('first_observed_at'))}")
+    lines.append(f"last_observed_at: {format_scalar(totals.get('last_observed_at'))}")
+    lines.append(f"null_value_rows: {format_scalar(totals.get('null_value_rows'))}")
+
+    coverage_rows = status.get("coverage_by_source", [])
+    lines.append("")
+    lines.append("Coverage By Source")
+    if coverage_rows:
+        lines.append(
+            render_table(
+                [
+                    "source_type",
+                    "station_id",
+                    "rows",
+                    "indicators",
+                    "null_rows",
+                    "first_observed_at",
+                    "last_observed_at",
+                ],
+                [
+                    [
+                        row["source_type"],
+                        row["station_id"],
+                        row["row_count"],
+                        row["indicator_count"],
+                        row["null_value_rows"],
+                        row["first_observed_at"],
+                        row["last_observed_at"],
+                    ]
+                    for row in coverage_rows
+                ],
+            )
+        )
+    else:
+        lines.append("No rows found in raw.airviro_measurement.")
+
+    indicator_rows = status.get("indicator_completeness", [])
+    lines.append("")
+    lines.append(f"Indicator Completeness (limit={indicator_limit})")
+    if indicator_rows:
+        lines.append(
+            render_table(
+                [
+                    "source_type",
+                    "station_id",
+                    "indicator",
+                    "grain",
+                    "rows",
+                    "expected_rows",
+                    "missing_rows",
+                    "missing_pct",
+                    "null_rows",
+                    "null_pct",
+                    "first_observed_at",
+                    "last_observed_at",
+                ],
+                [
+                    [
+                        row["source_type"],
+                        row["station_id"],
+                        row["indicator_code"],
+                        row["expected_grain"],
+                        row["row_count"],
+                        row["expected_rows"],
+                        row["missing_rows"],
+                        row["missing_pct"],
+                        row["null_value_rows"],
+                        row["null_value_pct"],
+                        row["first_observed_at"],
+                        row["last_observed_at"],
+                    ]
+                    for row in indicator_rows
+                ],
+            )
+        )
+    else:
+        lines.append("No indicator-level data available.")
+
+    watermark_rows = status.get("watermarks", [])
+    lines.append("")
+    lines.append("Watermarks")
+    if watermark_rows:
+        lines.append(
+            render_table(
+                ["pipeline_name", "watermark_date", "updated_at"],
+                [
+                    [
+                        row["pipeline_name"],
+                        row["watermark_date"],
+                        row["updated_at"],
+                    ]
+                    for row in watermark_rows
+                ],
+            )
+        )
+    else:
+        lines.append("No watermark rows.")
+
+    audit_rows = status.get("recent_ingestion_runs", [])
+    lines.append("")
+    lines.append(f"Recent Ingestion Runs (limit={audit_limit})")
+    if audit_rows:
+        lines.append(
+            render_table(
+                [
+                    "created_at",
+                    "source_key",
+                    "source_type",
+                    "station_id",
+                    "window_start",
+                    "window_end",
+                    "rows_read",
+                    "upserted",
+                    "duplicates",
+                    "splits",
+                    "status",
+                ],
+                [
+                    [
+                        row["created_at"],
+                        row["source_key"],
+                        row["source_type"],
+                        row["station_id"],
+                        row["window_start"],
+                        row["window_end"],
+                        row["rows_read"],
+                        row["records_upserted"],
+                        row["duplicate_records"],
+                        row["split_events"],
+                        row["status"],
+                    ]
+                    for row in audit_rows
+                ],
+            )
+        )
+    else:
+        lines.append("No ingestion audit rows.")
+
+    return "\n".join(lines)
+
+
 def build_parser() -> ArgumentParser:
     parser = ArgumentParser(description="Airviro ETL runner")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -232,6 +450,28 @@ def build_parser() -> ArgumentParser:
         action="append",
         default=[],
         help="Run only selected source keys (repeat or comma-separate values)",
+    )
+
+    status_parser = subparsers.add_parser(
+        "warehouse-status",
+        help="Print warehouse health and data-completeness report",
+    )
+    status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON output",
+    )
+    status_parser.add_argument(
+        "--indicator-limit",
+        type=int,
+        default=500,
+        help="Maximum number of indicator-level rows to include",
+    )
+    status_parser.add_argument(
+        "--audit-limit",
+        type=int,
+        default=10,
+        help="Maximum number of recent ingestion-audit rows to include",
     )
 
     return parser
@@ -400,6 +640,30 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 connection.close()
             print(f"Warehouse schema ensured on host '{selected_host}'.")
+            return 0
+
+        if args.command == "warehouse-status":
+            connection, selected_host = connect_warehouse(settings)
+            try:
+                status = collect_warehouse_status(
+                    connection,
+                    indicator_limit=args.indicator_limit,
+                    audit_limit=args.audit_limit,
+                )
+            finally:
+                connection.close()
+
+            status["database_host"] = selected_host
+            if args.json:
+                print(json.dumps(status, indent=2, default=str))
+            else:
+                print(
+                    render_warehouse_status(
+                        status,
+                        indicator_limit=args.indicator_limit,
+                        audit_limit=args.audit_limit,
+                    )
+                )
             return 0
 
         if args.command in {"run", "backfill"}:

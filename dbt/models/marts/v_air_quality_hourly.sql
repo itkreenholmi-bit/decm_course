@@ -13,6 +13,8 @@ with air_quality as (
     max(value_numeric) filter (where indicator_code = 'temp') as temp,
     max(value_numeric) filter (where indicator_code = 'hum') as hum,
     max(value_numeric) filter (where indicator_code = 'rain') as rain,
+    max(value_numeric) filter (where indicator_code = 'press') as press,
+    max(value_numeric) filter (where indicator_code = 'rad') as rad,
     max(value_numeric) filter (where indicator_code = 'wd10') as wd10,
     max(value_numeric) filter (where indicator_code = 'ws10') as ws10
   from {{ ref('stg_airviro_measurement') }}
@@ -42,7 +44,9 @@ select
   wd.sector_code as wind_sector,
   wd.sector_name as wind_sector_name,
   aq.hum,
-  aq.rain
+  aq.rain,
+  aq.press,
+  aq.rad
 from air_quality as aq
 left join {{ ref('dim_datetime_hour') }} as dt
   on dt.observed_at = aq.observed_at

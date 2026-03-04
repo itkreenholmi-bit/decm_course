@@ -14,9 +14,11 @@ BACKFILL_END ?=
 BACKFILL_CHUNK_DAYS ?= 31
 BACKFILL_SOURCE_KEYS ?=
 BACKFILL_ADVANCE_WATERMARK ?= true
+STATUS_INDICATOR_LIMIT ?= 500
+STATUS_AUDIT_LIMIT ?= 10
 
 .PHONY: help init check-host-workspace up-superset up-airflow up-all down logs ps reset-volumes reset-all \
-	etl-bootstrap etl-dry-run etl-backfill-2020-2025 etl-backfill-2020-today \
+	etl-bootstrap etl-dry-run etl-backfill-2020-2025 etl-backfill-2020-today warehouse-status warehouse-status-json \
 	devcontainer-join-course-network dbt-debug dbt-seed dbt-run dbt-test dbt-build \
 	airflow-list-dags airflow-list-runs airflow-trigger-incremental airflow-trigger-backfill \
 	airflow-unpause-dags airflow-pause-dags
@@ -36,6 +38,9 @@ help:
 	@echo "  make etl-dry-run    Run ETL extraction + validation without database writes"
 	@echo "  make etl-backfill-2020-2025  Load Airviro data for 2020-2025"
 	@echo "  make etl-backfill-2020-today Load Airviro data from 2020-01-01 to today"
+	@echo "  make warehouse-status        Show warehouse health + completeness report"
+	@echo "  make warehouse-status-json   Same report in JSON format"
+	@echo "    Optional: STATUS_INDICATOR_LIMIT=500 STATUS_AUDIT_LIMIT=10"
 	@echo "    Optional: add VERBOSE=1 to ETL targets for progress logs"
 	@echo "  make dbt-debug      Validate dbt connection/profile in airflow-scheduler"
 	@echo "  make dbt-seed       Load dbt seeds (wind direction mapping)"
@@ -104,6 +109,12 @@ etl-backfill-2020-2025: init
 
 etl-backfill-2020-today: init
 	@.venv/bin/python -m etl.airviro.cli backfill --from 2020-01-01 $(ETL_VERBOSE_FLAG)
+
+warehouse-status: init
+	@.venv/bin/python -m etl.airviro.cli warehouse-status --indicator-limit $(STATUS_INDICATOR_LIMIT) --audit-limit $(STATUS_AUDIT_LIMIT)
+
+warehouse-status-json: init
+	@.venv/bin/python -m etl.airviro.cli warehouse-status --json --indicator-limit $(STATUS_INDICATOR_LIMIT) --audit-limit $(STATUS_AUDIT_LIMIT)
 
 devcontainer-join-course-network: init
 	@project_name="$$(grep -E '^COMPOSE_PROJECT_NAME=' "$(ENV_FILE)" | cut -d '=' -f2-)"; \
